@@ -1,0 +1,3 @@
+[develop]
+script-dir=$base/lib/edgeimpulse_ros
+install-scripts=$base/lib/edgeimpulse_ros

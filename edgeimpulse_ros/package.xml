@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>edgeimpulse_ros</name>
+  <version>0.1.0</version>
+  <description>ROS2 wrapper to run Edge Impulse object detection and publish detections as ROS messages.</description>
+
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>python3</exec_depend>
+</package>
