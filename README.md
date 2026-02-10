@@ -3,17 +3,15 @@
 Minimal ROS2 wrapper to run the Edge Impulse Linux SDK example classifier and publish detections as ROS messages.
 
 Features
-- Runs the SDK `examples/image/classify.py` as a subprocess
-- Parses its stdout for bounding boxes
+- Imports the Edge Impulse Linux SDK and runs the classifier directly (no subprocess)
+- Uses the camera via OpenCV and the SDK `ImageImpulseRunner`
 - Publishes detections as JSON on topic `edgeimpulse/detections` (`std_msgs/String`)
 
 Requirements
 - ROS2 (Foxy/Galactic/Humble/etc.) with Python support
 - Python 3
-- Edge Impulse linux SDK (the repository `https://github.com/edgeimpulse/linux-sdk-python`) cloned locally (see instructions)
-
-Why subprocess?
-This wrapper uses the existing example script output format (text) to avoid hard dependency on SDK internals and to remain compatible with the user's working example.
+- OpenCV for Python (`opencv-python`)
+- Edge Impulse linux SDK (see install instructions)
 
 Install and build
 
@@ -24,11 +22,20 @@ cd ~/your_ws/src
 git clone <this-repo-url> edgeimpulse_ros
 ```
 
-2. Clone (or download) the Edge Impulse linux SDK somewhere on the machine. Example:
+2. Install the Edge Impulse linux SDK (option A) or clone it (option B):
+
+Option A - install from GitHub (recommended):
 
 ```bash
-cd ~/repos
-git clone https://github.com/edgeimpulse/linux-sdk-python.git
+pip3 install --user git+https://github.com/edgeimpulse/linux-sdk-python.git
+```
+
+Option B - clone and editable install:
+
+```bash
+git clone https://github.com/edgeimpulse/linux-sdk-python.git ~/repos/linux-sdk-python
+cd ~/repos/linux-sdk-python
+pip3 install --user -e .
 ```
 
 3. Build the ROS workspace:
@@ -41,13 +48,12 @@ source install/setup.bash
 
 Run the node
 
-The node runs the SDK example `examples/image/classify.py`. Provide the full path to that script and the model `.eim` file.
+The node imports the Edge Impulse SDK directly. Provide the model `.eim` file path and camera id.
 
 ```bash
 # Example
 ros2 run edgeimpulse_ros edgeimpulse_detector \
-  --ros-args -p sdk_script:=/home/user/repos/linux-sdk-python/examples/image/classify.py \
-             -p model_path:=/path/to/model.eim \
+  --ros-args -p model_path:=/path/to/model.eim \
              -p camera:=0
 ```
 
@@ -61,6 +67,6 @@ What you'll get
 Notes & next steps
 - You can adapt the parser if your SDK output format differs.
 - If you prefer strongly-typed ROS messages, the node can be extended to publish a custom message type (requires adding msg files and message generation).
-- To avoid the subprocess approach, the node can be reimplemented by importing the SDK directly; if you want that, tell me and I will update the node.
+- The node imports the SDK directly; no subprocess is used. If you'd like a custom ROS message type for detections, I can add a `msg` and publishing logic.
 # edgeimpulse-ros
 ROS packages for edge impulse deployment

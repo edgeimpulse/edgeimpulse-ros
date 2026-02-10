@@ -2,13 +2,21 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-import subprocess
 import threading
-import re
 import json
-import shlex
 import sys
 import os
+import time
+import signal
+
+try:
+    from edge_impulse_linux.image import ImageImpulseRunner
+except Exception:
+    ImageImpulseRunner = None
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 
 class EdgeImpulseDetector(Node):
@@ -36,52 +44,61 @@ class EdgeImpulseDetector(Node):
 
         self.pub = self.create_publisher(String, 'edgeimpulse/detections', 10)
 
-        # Start the subprocess that runs the Edge Impulse example classifier
-        cmd = [sys.executable, self.sdk_script, self.model_path, str(self.camera)]
-        self.get_logger().info('Starting SDK subprocess: ' + ' '.join(shlex.quote(c) for c in cmd))
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, text=True)
+        # Validate imports
+        if ImageImpulseRunner is None:
+            self.get_logger().error('edge_impulse_linux SDK not available. Install or add to PYTHONPATH.')
+            raise RuntimeError('edge_impulse_linux SDK not available')
+        if cv2 is None:
+            self.get_logger().error('OpenCV (cv2) not available. Install via pip install opencv-python')
+            raise RuntimeError('cv2 not available')
 
-        # Start reader thread
-        self._thread = threading.Thread(target=self._reader)
+        # Start runner thread
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._runner_thread)
         self._thread.daemon = True
         self._thread.start()
 
-        self._buffer = []
+        self._runner = None
 
-        # Patterns
-        self.re_found = re.compile(r'Found (\d+) bounding boxes')
-        self.re_box = re.compile(r"(?P<label>[^\(]+) \((?P<score>\d+\.\d+)\): x=(?P<x>-?\d+) y=(?P<y>-?\d+) w=(?P<w>-?\d+) h=(?P<h>-?\d+)")
+    def _runner_thread(self):
+        try:
+            with ImageImpulseRunner(self.model_path) as runner:
+                self._runner = runner
+                model_info = runner.init()
+                self.get_logger().info('Loaded runner for "' + model_info['project']['owner'] + ' / ' + model_info['project']['name'] + '"')
 
-    def _reader(self):
-        # Read lines and parse groups of detections
-        current_boxes = []
-        for raw in self.proc.stdout:
-            line = raw.strip()
-            if not line:
-                continue
-            self.get_logger().debug('SDK: ' + line)
-            m = self.re_found.search(line)
-            if m:
-                # new group - if we had boxes, publish them
-                if current_boxes:
-                    self._publish_boxes(current_boxes)
-                    current_boxes = []
-                continue
-            m2 = self.re_box.search(line)
-            if m2:
-                box = {
-                    'label': m2.group('label').strip(),
-                    'score': float(m2.group('score')),
-                    'x': int(m2.group('x')),
-                    'y': int(m2.group('y')),
-                    'w': int(m2.group('w')),
-                    'h': int(m2.group('h')),
-                }
-                current_boxes.append(box)
+                video_id = int(self.camera)
+                # Try opening camera to ensure it's valid
+                cam = cv2.VideoCapture(video_id)
+                if not cam.isOpened():
+                    cam.release()
+                    raise RuntimeError(f'Cannot open camera {video_id}')
+                cam.release()
 
-        # subprocess ended, publish any remaining boxes
-        if current_boxes:
-            self._publish_boxes(current_boxes)
+                # Iterate classifier results
+                for res, img in runner.classifier(video_id):
+                    if self._stop_event.is_set():
+                        break
+                    if not res or 'result' not in res:
+                        continue
+                    result = res['result']
+                    if 'bounding_boxes' in result:
+                        boxes = []
+                        for bb in result['bounding_boxes']:
+                            boxes.append({
+                                'label': bb.get('label'),
+                                'score': float(bb.get('value', 0)),
+                                'x': int(bb.get('x', 0)),
+                                'y': int(bb.get('y', 0)),
+                                'w': int(bb.get('width', bb.get('w', 0))),
+                                'h': int(bb.get('height', bb.get('h', 0))),
+                            })
+                        self._publish_boxes(boxes)
+
+        except Exception as e:
+            self.get_logger().error('Runner error: ' + str(e))
+        finally:
+            self.get_logger().info('Runner thread exiting')
 
     def _publish_boxes(self, boxes):
         msg = String()
@@ -90,10 +107,16 @@ class EdgeImpulseDetector(Node):
         self.get_logger().info(f'Published {len(boxes)} boxes')
 
     def destroy_node(self):
-        # terminate subprocess cleanly
+        # signal runner thread to stop
         try:
-            if self.proc and self.proc.poll() is None:
-                self.proc.terminate()
+            self._stop_event.set()
+            if self._runner:
+                try:
+                    self._runner.stop()
+                except Exception:
+                    pass
+            if self._thread.is_alive():
+                self._thread.join(timeout=2.0)
         except Exception:
             pass
         super().destroy_node()
