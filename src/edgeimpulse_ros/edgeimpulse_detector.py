@@ -5,6 +5,8 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import String
+from std_msgs.msg import Int32
 
 from edge_impulse_linux.image import ImageImpulseRunner
 from vision_msgs.msg import (
@@ -26,9 +28,15 @@ class EdgeImpulseDetector(Node):
         self.declare_parameter('score_threshold', 0.5)
         self.declare_parameter('frame_id', 'camera')
         self.declare_parameter('detections_topic', 'edgeimpulse/detections')
+        self.declare_parameter('timing_topic', 'edgeimpulse/timing')
+        self.declare_parameter('count_topic', 'edgeimpulse/count')
+        self.declare_parameter('publish_timing', True)
+        self.declare_parameter('publish_count', True)
         self.declare_parameter('publish_empty', False)
         self.declare_parameter('log_detections', True)
         self.declare_parameter('log_raw_bounding_boxes', True)
+        self.declare_parameter('log_frame_summary', True)
+        self.declare_parameter('fill_detection_header', False)
         self.declare_parameter('status_period_sec', 5.0)
 
         self._model_path = self.get_parameter('model_path').get_parameter_value().string_value
@@ -36,9 +44,15 @@ class EdgeImpulseDetector(Node):
         self._score_threshold = float(self.get_parameter('score_threshold').value)
         self._frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self._detections_topic = self.get_parameter('detections_topic').get_parameter_value().string_value
+        self._timing_topic = self.get_parameter('timing_topic').get_parameter_value().string_value
+        self._count_topic = self.get_parameter('count_topic').get_parameter_value().string_value
+        self._publish_timing = bool(self.get_parameter('publish_timing').value)
+        self._publish_count = bool(self.get_parameter('publish_count').value)
         self._publish_empty = bool(self.get_parameter('publish_empty').value)
         self._log_detections = bool(self.get_parameter('log_detections').value)
         self._log_raw_bounding_boxes = bool(self.get_parameter('log_raw_bounding_boxes').value)
+        self._log_frame_summary = bool(self.get_parameter('log_frame_summary').value)
+        self._fill_detection_header = bool(self.get_parameter('fill_detection_header').value)
         self._status_period_sec = float(self.get_parameter('status_period_sec').value)
 
         if not self._model_path:
@@ -47,6 +61,8 @@ class EdgeImpulseDetector(Node):
         self._model_path = os.path.expanduser(self._model_path)
 
         self._pub = self.create_publisher(Detection2DArray, self._detections_topic, 10)
+        self._timing_pub = self.create_publisher(String, self._timing_topic, 10)
+        self._count_pub = self.create_publisher(Int32, self._count_topic, 10)
 
         self._frames_total = 0
         self._frames_with_detections = 0
@@ -98,12 +114,20 @@ class EdgeImpulseDetector(Node):
 
         self._frames_total += 1
 
+        stamp = self.get_clock().now().to_msg()
+
         msg = Detection2DArray()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = stamp
         msg.header.frame_id = self._frame_id
 
         raw_bb_count = 0
         published_bb_count = 0
+
+        timing = res.get('timing', {}) if isinstance(res, dict) else {}
+        dsp_ms = float(timing.get('dsp', 0.0) or 0.0)
+        cls_ms = float(timing.get('classification', 0.0) or 0.0)
+        anom_ms = float(timing.get('anomaly', 0.0) or 0.0)
+        total_ms = dsp_ms + cls_ms + anom_ms
 
         for bb in bbs:
             raw_bb_count += 1
@@ -125,7 +149,8 @@ class EdgeImpulseDetector(Node):
                     continue
 
                 det = Detection2D()
-                det.header = msg.header
+                if self._fill_detection_header:
+                    det.header = msg.header
 
                 bbox = BoundingBox2D()
                 # `vision_msgs/BoundingBox2D.center` differs across releases:
@@ -179,6 +204,12 @@ class EdgeImpulseDetector(Node):
                     self._last_bb_error_log_time = now
                 continue
 
+        if self._log_frame_summary:
+            self.get_logger().info(
+                f'Frame detections: raw={raw_bb_count} published={published_bb_count} '
+                f'timing_ms(dsp={dsp_ms:.0f}, cls={cls_ms:.0f}, anom={anom_ms:.0f}, total={total_ms:.0f})'
+            )
+
         if published_bb_count > 0:
             self._frames_with_detections += 1
 
@@ -192,6 +223,22 @@ class EdgeImpulseDetector(Node):
 
         if published_bb_count > 0 or self._publish_empty:
             self._pub.publish(msg)
+
+        if self._publish_count:
+            count_msg = Int32()
+            count_msg.data = int(published_bb_count)
+            self._count_pub.publish(count_msg)
+
+        if self._publish_timing:
+            timing_msg = String()
+            # Keep this simple and stable: one line JSON with the key numbers.
+            timing_msg.data = (
+                '{'
+                f'"dsp_ms":{dsp_ms},"classification_ms":{cls_ms},"anomaly_ms":{anom_ms},'
+                f'"total_ms":{total_ms},"raw_boxes":{raw_bb_count},"published_boxes":{published_bb_count}'
+                '}'
+            )
+            self._timing_pub.publish(timing_msg)
 
     def destroy_node(self):
         # signal runner thread to stop
