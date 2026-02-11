@@ -1,11 +1,19 @@
 import os
 import threading
-import sys
-import site
 from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+
+from edge_impulse_linux.image import ImageImpulseRunner
+from geometry_msgs.msg import Pose2D
+from vision_msgs.msg import (
+    BoundingBox2D,
+    Detection2D,
+    Detection2DArray,
+    ObjectHypothesis,
+    ObjectHypothesisWithPose,
+)
 
 
 class EdgeImpulseDetector(Node):
@@ -30,36 +38,6 @@ class EdgeImpulseDetector(Node):
 
         self._model_path = os.path.expanduser(self._model_path)
 
-        # ROS launch environments sometimes disable user site-packages (e.g. PYTHONNOUSERSITE=1).
-        # If the EI SDK was installed with `pip --user`, it lives under the user site directory.
-        try:
-            user_site = site.getusersitepackages()
-            if user_site and user_site not in sys.path:
-                site.addsitedir(user_site)
-        except Exception:
-            user_site = ''
-
-        try:
-            import edge_impulse_linux  # noqa: F401,WPS433
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                'Python module `edge_impulse_linux` not found for this interpreter:\n'
-                f'  sys.executable={sys.executable}\n\n'
-                f'  user_site={user_site}\n\n'
-                'Install the Edge Impulse Linux Python SDK into the same Python environment, e.g.:\n'
-                f'  {sys.executable} -m pip install --user git+https://github.com/edgeimpulse/linux-sdk-python.git\n\n'
-                'If you are using a virtualenv, activate it BEFORE `colcon build`, then rebuild.'
-            ) from exc
-
-        try:
-            from vision_msgs.msg import Detection2DArray  # noqa: WPS433
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                'Python module `vision_msgs` not found. Install it via your ROS distro packages, e.g.\n'
-                '  sudo apt update && sudo apt install ros-$ROS_DISTRO-vision-msgs\n'
-                'Then re-source your environment and try again.'
-            ) from exc
-
         self._pub = self.create_publisher(Detection2DArray, self._detections_topic, 10)
 
         # Start runner thread
@@ -72,8 +50,6 @@ class EdgeImpulseDetector(Node):
 
     def _runner_thread(self):
         try:
-            from edge_impulse_linux.image import ImageImpulseRunner  # noqa: WPS433
-
             with ImageImpulseRunner(self._model_path) as runner:
                 self._runner = runner
                 model_info = runner.init()
@@ -94,15 +70,6 @@ class EdgeImpulseDetector(Node):
             self.get_logger().info('Runner thread exiting')
 
     def _publish_result(self, res: dict):
-        from vision_msgs.msg import (  # noqa: WPS433
-            BoundingBox2D,
-            Detection2D,
-            Detection2DArray,
-            ObjectHypothesisWithPose,
-        )
-        from vision_msgs.msg import ObjectHypothesis  # noqa: WPS433
-        from geometry_msgs.msg import Pose2D  # noqa: WPS433
-
         if not isinstance(res, dict) or 'result' not in res:
             return
 

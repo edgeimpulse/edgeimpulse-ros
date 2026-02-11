@@ -10,14 +10,18 @@ Features
 Requirements
 - ROS2 (Foxy/Galactic/Humble/etc.) with Python support
 - Python 3
-- Edge Impulse linux SDK (see install instructions)
 - A ROS install that includes `vision_msgs` and `geometry_msgs`
+- Edge Impulse Linux Python SDK (`edge_impulse_linux`)
+- OpenCV Python bindings (`cv2`) available to the same Python interpreter
 
-On Ubuntu you can install `vision_msgs` via:
+On Ubuntu you can install ROS and OpenCV deps via:
 
 ```bash
 sudo apt update
-sudo apt install ros-$ROS_DISTRO-vision-msgs
+sudo apt install \
+  ros-$ROS_DISTRO-vision-msgs \
+  ros-$ROS_DISTRO-geometry-msgs \
+  python3-opencv
 ```
 
 Install and build
@@ -31,39 +35,20 @@ git clone <this-repo-url> edgeimpulse_ros
 
 2. Install the Edge Impulse linux SDK (option A) or clone it (option B):
 
-Option A - install from GitHub (recommended):
+Install the Edge Impulse Linux Python SDK into your system Python (no venv):
 
 ```bash
-pip3 install --user git+https://github.com/edgeimpulse/linux-sdk-python.git
+python3 -m pip install --user edge_impulse_linux
 ```
 
-Option B - clone and editable install:
+If you prefer installing from the upstream repo:
 
 ```bash
-git clone https://github.com/edgeimpulse/linux-sdk-python.git ~/repos/linux-sdk-python
-cd ~/repos/linux-sdk-python
-pip3 install --user -e .
+python3 -m pip install --user git+https://github.com/edgeimpulse/linux-sdk-python.git
 ```
 
-Note: Don’t place `linux-sdk-python` inside your ROS workspace `src/` unless you add a `COLCON_IGNORE` file.
-Colcon will try to build it and fail to parse its `install_requires`.
-
-Virtualenv note
-
-ROS 2 console scripts installed by `colcon build` are tied to the Python interpreter used during the build.
-If you create/activate a venv *after* building, `ros2 run` may still use system Python and won’t see packages installed in the venv.
-
-Fix options:
-- Activate your venv first, then rebuild your workspace (`rm -rf build install log && colcon build`).
-- Or install the Edge Impulse SDK into the system Python that ROS is using.
-
-If you installed the EI SDK with `pip --user` but ROS still can’t import it, check whether your environment disables user site-packages:
-
-```bash
-echo $PYTHONNOUSERSITE
-```
-
-If it prints `1`, unset it (or start a clean shell) and try again.
+Note: Don’t place `linux-sdk-python` inside your ROS workspace `src/`.
+Colcon will try to treat it as a workspace package. If you must keep it there, add a `COLCON_IGNORE` file.
 
 3. Build the ROS workspace:
 
@@ -103,4 +88,3 @@ Notes & next steps
 - The node expects the Edge Impulse Linux Python SDK to be installed (see install section).
 - This is intentionally MVP: camera in -> detections out.
 # edgeimpulse-ros
-ROS packages for edge impulse deployment
