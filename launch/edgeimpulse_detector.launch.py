@@ -10,6 +10,10 @@ def generate_launch_description():
     score_threshold = LaunchConfiguration('score_threshold')
     frame_id = LaunchConfiguration('frame_id')
     detections_topic = LaunchConfiguration('detections_topic')
+    publish_empty = LaunchConfiguration('publish_empty')
+    log_detections = LaunchConfiguration('log_detections')
+    log_raw_bounding_boxes = LaunchConfiguration('log_raw_bounding_boxes')
+    status_period_sec = LaunchConfiguration('status_period_sec')
 
     return LaunchDescription(
         [
@@ -38,6 +42,26 @@ def generate_launch_description():
                 default_value='edgeimpulse/detections',
                 description='Topic name for Detection2DArray output',
             ),
+            DeclareLaunchArgument(
+                'publish_empty',
+                default_value='false',
+                description='Publish empty Detection2DArray when there are no detections',
+            ),
+            DeclareLaunchArgument(
+                'log_detections',
+                default_value='true',
+                description='Log published detections to terminal',
+            ),
+            DeclareLaunchArgument(
+                'log_raw_bounding_boxes',
+                default_value='true',
+                description='Log raw bounding boxes from EI output (before threshold)',
+            ),
+            DeclareLaunchArgument(
+                'status_period_sec',
+                default_value='5.0',
+                description='Periodic status logging interval in seconds',
+            ),
             Node(
                 package='edgeimpulse_ros',
                 executable='edgeimpulse_detector',
@@ -50,6 +74,10 @@ def generate_launch_description():
                         'score_threshold': score_threshold,
                         'frame_id': frame_id,
                         'detections_topic': detections_topic,
+                        'publish_empty': publish_empty,
+                        'log_detections': log_detections,
+                        'log_raw_bounding_boxes': log_raw_bounding_boxes,
+                        'status_period_sec': status_period_sec,
                     }
                 ],
             ),
