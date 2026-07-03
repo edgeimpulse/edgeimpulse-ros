@@ -1,0 +1,35 @@
+# Example parameters for the Edge Impulse detector node.
+#
+# Run with:
+#   ros2 run edgeimpulse_ros edgeimpulse_detector \
+#     --ros-args --params-file install/edgeimpulse_ros/share/edgeimpulse_ros/config/edgeimpulse_detector.yaml
+#
+# or point a launch file at it. Every value below is optional except model_path.
+edgeimpulse_detector:
+  ros__parameters:
+    # REQUIRED: absolute path to your exported .eim model.
+    model_path: ""
+
+    # Where images come from. This node does NOT open a camera; run any camera
+    # driver (v4l2_camera, usb_cam, qrb_ros_camera, a rosbag, ...) and set this
+    # to the topic it publishes.
+    image_topic: "image"
+    image_transport: "raw"        # raw | compressed
+    image_qos: "sensor_data"      # sensor_data | reliable | default
+
+    # Preprocessing. "auto" mirrors the resize mode configured in the Studio.
+    resize_mode: "auto"           # auto | squash | fit-shortest | fit-longest
+
+    # Filtering. A negative value defers to the model's own threshold.
+    confidence_threshold: -1.0
+
+    # Debug / introspection.
+    publish_debug_image: false
+    overlay_labels: true
+    publish_diagnostics: true
+    diagnostic_period: 1.0
+    warn_on_drop: false
+
+    # Metadata.
+    publish_label_info: true
+    frame_id_override: ""         # keep empty to propagate the source frame_id

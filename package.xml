@@ -1,22 +1,42 @@
 <?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>edgeimpulse_ros</name>
-  <version>0.1.0</version>
-  <description>ROS2 wrapper to run Edge Impulse object detection and publish detections as ROS messages.</description>
+  <version>1.0.0</version>
+  <description>
+    Run Edge Impulse (.eim) image models in ROS 2. Consumes sensor_msgs/Image
+    from any camera driver and publishes idiomatic vision_msgs results
+    (Detection2DArray, Classification), anomaly scores, label metadata and
+    diagnostics.
+  </description>
 
-  <maintainer email="you@example.com">Your Name</maintainer>
+  <maintainer email="hello@edgeimpulse.com">Edge Impulse</maintainer>
   <license>MIT</license>
+  <url type="website">https://www.edgeimpulse.com</url>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>rclpy</depend>
+  <depend>rcl_interfaces</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>vision_msgs</depend>
-  <depend>geometry_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 
-  <exec_depend>python3</exec_depend>
+  <!--
+    The Edge Impulse Linux Python SDK (edge_impulse_linux) is not distributed
+    via rosdep. Install it into the same Python interpreter used by ROS:
+        pip install edge_impulse_linux
+  -->
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

@@ -1,268 +1,402 @@
-import os
+"""
+Edge Impulse detector node: images in, ``vision_msgs`` out.
+
+This node is deliberately camera-agnostic. It subscribes to a standard
+``sensor_msgs/Image`` (or ``CompressedImage``) topic produced by *any* camera
+driver, runs an Edge Impulse ``.eim`` model on each frame, and publishes the
+result using idiomatic ``vision_msgs`` message types. Source image timestamps
+and ``frame_id`` are propagated so downstream TF lookups and sensor fusion keep
+working.
+"""
+
+from __future__ import annotations
+
+import sys
 import threading
 import time
-from typing import Optional
 
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from edgeimpulse_ros import conversions, image_utils
+from edgeimpulse_ros.model_runner import (
+    KIND_ANOMALY,
+    KIND_CLASSIFICATION,
+    KIND_DETECTION,
+    ModelRunner,
+)
+from rcl_interfaces.msg import ParameterDescriptor
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
-from std_msgs.msg import Int32
-
-from edge_impulse_linux.image import ImageImpulseRunner
-from vision_msgs.msg import (
-    BoundingBox2D,
-    Detection2D,
-    Detection2DArray,
-    ObjectHypothesis,
-    ObjectHypothesisWithPose,
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    qos_profile_sensor_data,
+    QoSProfile,
+    ReliabilityPolicy,
 )
+from sensor_msgs.msg import CompressedImage, Image
+from std_msgs.msg import Float32, Header
+
+_RESIZE_ALIASES = {
+    'squash': 'squash', 'none': 'squash', 'stretch': 'squash',
+    'fit-shortest': 'fit-shortest', 'fit-short': 'fit-shortest',
+    'crop': 'fit-shortest', 'cover': 'fit-shortest',
+    'fit-longest': 'fit-longest', 'fit-long': 'fit-longest',
+    'pad': 'fit-longest', 'contain': 'fit-longest', 'letterbox': 'fit-longest',
+}
+
+
+def _normalize_resize_mode(mode: str, fallback: str = 'fit-shortest') -> str:
+    """Map assorted resize-mode spellings onto the three canonical modes."""
+    return _RESIZE_ALIASES.get(str(mode).lower().strip(), fallback)
 
 
 class EdgeImpulseDetector(Node):
+    """ROS 2 node wrapping a single Edge Impulse image model."""
+
     def __init__(self):
+        """Declare parameters, load the model and wire up ROS entities."""
         super().__init__('edgeimpulse_detector')
 
-        # Parameters
-        self.declare_parameter('model_path', '')
-        self.declare_parameter('camera', 0)
-        self.declare_parameter('score_threshold', 0.5)
-        self.declare_parameter('frame_id', 'camera')
-        self.declare_parameter('detections_topic', 'edgeimpulse/detections')
-        self.declare_parameter('timing_topic', 'edgeimpulse/timing')
-        self.declare_parameter('count_topic', 'edgeimpulse/count')
-        self.declare_parameter('publish_timing', True)
-        self.declare_parameter('publish_count', True)
-        self.declare_parameter('publish_empty', False)
-        self.declare_parameter('log_detections', True)
-        self.declare_parameter('log_raw_bounding_boxes', True)
-        self.declare_parameter('log_frame_summary', True)
-        self.declare_parameter('fill_detection_header', False)
-        self.declare_parameter('status_period_sec', 5.0)
+        model_path = self._declare('model_path', '',
+                                   'Path to the Edge Impulse .eim model (required)')
+        self._image_topic = self._declare('image_topic', 'image',
+                                          'Input image topic to subscribe to')
+        self._transport = self._declare('image_transport', 'raw',
+                                        'Image transport: "raw" or "compressed"')
+        self._qos_name = self._declare('image_qos', 'sensor_data',
+                                       'Subscriber QoS: sensor_data | reliable | default')
+        resize_mode = self._declare('resize_mode', 'auto',
+                                    'auto | squash | fit-shortest | fit-longest')
+        threshold = float(self._declare('confidence_threshold', -1.0,
+                                        'Min confidence to publish; <0 uses model default'))
+        self._publish_debug = bool(self._declare('publish_debug_image', False,
+                                                 'Publish an annotated debug image'))
+        self._overlay_labels = bool(self._declare('overlay_labels', True,
+                                                  'Draw labels/scores on the debug image'))
+        self._frame_id_override = self._declare('frame_id_override', '',
+                                                'Override the source image frame_id if set')
+        self._publish_diag = bool(self._declare('publish_diagnostics', True,
+                                                'Publish diagnostic_msgs/DiagnosticArray'))
+        diag_period = float(self._declare('diagnostic_period', 1.0,
+                                          'Diagnostics publish period in seconds'))
+        self._warn_on_drop = bool(self._declare('warn_on_drop', False,
+                                                'Log a warning when stale frames are dropped'))
+        publish_label_info = bool(self._declare('publish_label_info', True,
+                                                'Publish a latched vision_msgs/LabelInfo'))
 
-        self._model_path = self.get_parameter('model_path').get_parameter_value().string_value
-        self._camera = int(self.get_parameter('camera').value)
-        self._score_threshold = float(self.get_parameter('score_threshold').value)
-        self._frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
-        self._detections_topic = self.get_parameter('detections_topic').get_parameter_value().string_value
-        self._timing_topic = self.get_parameter('timing_topic').get_parameter_value().string_value
-        self._count_topic = self.get_parameter('count_topic').get_parameter_value().string_value
-        self._publish_timing = bool(self.get_parameter('publish_timing').value)
-        self._publish_count = bool(self.get_parameter('publish_count').value)
-        self._publish_empty = bool(self.get_parameter('publish_empty').value)
-        self._log_detections = bool(self.get_parameter('log_detections').value)
-        self._log_raw_bounding_boxes = bool(self.get_parameter('log_raw_bounding_boxes').value)
-        self._log_frame_summary = bool(self.get_parameter('log_frame_summary').value)
-        self._fill_detection_header = bool(self.get_parameter('fill_detection_header').value)
-        self._status_period_sec = float(self.get_parameter('status_period_sec').value)
+        if not model_path:
+            raise RuntimeError('Parameter "model_path" is required (path to the .eim file)')
 
-        if not self._model_path:
-            raise RuntimeError('Parameter `model_path` is required (path to .eim file)')
+        self._threshold = None if threshold < 0.0 else threshold
+        self._compressed = str(self._transport).lower() == 'compressed'
 
-        self._model_path = os.path.expanduser(self._model_path)
+        # --- Load the model up front so startup fails fast on a bad path. ---
+        self._runner = ModelRunner(model_path)
+        self._model = self._runner.start()
+        self._kinds = self._model.output_kinds
+        self._resize_mode = (_normalize_resize_mode(self._model.resize_mode)
+                             if str(resize_mode).lower() == 'auto'
+                             else _normalize_resize_mode(resize_mode))
+        self.get_logger().info(
+            f'Loaded model "{self._model.owner}/{self._model.name}" '
+            f'type={self._model.model_type or "?"} '
+            f'input={self._model.input_width}x{self._model.input_height} '
+            f'{"gray" if self._model.grayscale else "rgb"} '
+            f'resize={self._resize_mode} labels={self._model.labels}')
 
-        self._pub = self.create_publisher(Detection2DArray, self._detections_topic, 10)
-        self._timing_pub = self.create_publisher(String, self._timing_topic, 10)
-        self._count_pub = self.create_publisher(Int32, self._count_topic, 10)
+        if not self._model.is_image_model:
+            raise RuntimeError(
+                'Loaded model does not expect an image input; this node only '
+                'supports Edge Impulse image models.')
 
-        self._frames_total = 0
-        self._frames_with_detections = 0
-        self._last_status_time = time.monotonic()
-        self._bb_error_count = 0
-        self._last_bb_error_log_time = 0.0
+        self._setup_publishers(publish_label_info)
+        self._publish_metadata()
 
-        # Start runner thread
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._runner_thread)
-        self._thread.daemon = True
-        self._thread.start()
+        # --- Threading / frame handoff state (latest-frame-wins). ---
+        self._frame_lock = threading.Lock()
+        self._stats_lock = threading.Lock()
+        self._latest_msg = None
+        self._pending_drops = 0
+        self._frame_event = threading.Event()
+        self._shutdown = threading.Event()
 
-        self._runner: Optional[object] = None
+        self._frames = 0
+        self._drops = 0
+        self._last_latency_ms = 0.0
+        self._ei_timing = {}
+        self._last_anomaly = None
+        self._last_error = ''
+        self._diag_last_frames = 0
+        self._diag_last_time = time.monotonic()
 
-    def _runner_thread(self):
-        try:
-            with ImageImpulseRunner(self._model_path) as runner:
-                self._runner = runner
-                model_info = runner.init()
-                project = model_info.get('project', {}) if isinstance(model_info, dict) else {}
-                self.get_logger().info(
-                    f'Loaded EI model: {project.get("owner", "?")} / {project.get("name", "?")}. '
-                    f'camera={self._camera} score_threshold={self._score_threshold}'
-                )
+        self._create_subscription()
 
-                for res, _img in runner.classifier(self._camera):
-                    if self._stop_event.is_set():
-                        break
-                    self._publish_result(res)
+        self._worker = threading.Thread(target=self._worker_loop, name='ei_inference',
+                                        daemon=True)
+        self._worker.start()
 
-        except Exception as e:
-            # The EI runner can throw exceptions while stopping (e.g. broken pipe / connection reset).
-            if self._stop_event.is_set():
-                self.get_logger().info('Runner stopped')
-            else:
-                self.get_logger().error('Runner error: ' + str(e))
-        finally:
-            self.get_logger().info('Runner thread exiting')
+        if self._publish_diag and diag_period > 0.0:
+            self._diag_timer = self.create_timer(diag_period, self._publish_diagnostics)
 
-    def _publish_result(self, res: dict):
-        if not isinstance(res, dict) or 'result' not in res:
-            return
+    # ------------------------------------------------------------------ setup
 
-        result = res.get('result', {})
-        bbs = result.get('bounding_boxes', None)
-        if bbs is None:
-            return
+    def _declare(self, name, default, description):
+        """Declare a described parameter and return its initial value."""
+        self.declare_parameter(name, default, ParameterDescriptor(description=description))
+        return self.get_parameter(name).value
 
-        self._frames_total += 1
+    def _setup_publishers(self, publish_label_info):
+        """Create result publishers according to the model's output kinds."""
+        results_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                                 history=HistoryPolicy.KEEP_LAST)
+        latched_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                 history=HistoryPolicy.KEEP_LAST,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-        stamp = self.get_clock().now().to_msg()
+        self._detections_pub = None
+        self._classification_pub = None
+        self._anomaly_pub = None
+        if KIND_DETECTION in self._kinds:
+            self._detections_pub = self.create_publisher(
+                conversions.Detection2DArray, '~/detections', results_qos)
+        if KIND_CLASSIFICATION in self._kinds:
+            self._classification_pub = self.create_publisher(
+                conversions.ClassificationMsg, '~/classification', results_qos)
+        if KIND_ANOMALY in self._kinds:
+            self._anomaly_pub = self.create_publisher(Float32, '~/anomaly', results_qos)
 
-        msg = Detection2DArray()
-        msg.header.stamp = stamp
-        msg.header.frame_id = self._frame_id
+        self._vision_info_pub = self.create_publisher(
+            conversions.VisionInfo, '~/vision_info', latched_qos)
+        self._label_info_pub = None
+        if publish_label_info and conversions.has_label_info():
+            self._label_info_pub = self.create_publisher(
+                conversions.LabelInfo, '~/label_info', latched_qos)
 
-        raw_bb_count = 0
-        published_bb_count = 0
+        self._debug_pub = None
+        if self._publish_debug:
+            self._debug_pub = self.create_publisher(Image, '~/debug_image',
+                                                    qos_profile_sensor_data)
 
-        timing = res.get('timing', {}) if isinstance(res, dict) else {}
-        dsp_ms = float(timing.get('dsp', 0.0) or 0.0)
-        cls_ms = float(timing.get('classification', 0.0) or 0.0)
-        anom_ms = float(timing.get('anomaly', 0.0) or 0.0)
-        total_ms = dsp_ms + cls_ms + anom_ms
+        self._diag_pub = None
+        if self._publish_diag:
+            self._diag_pub = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
 
-        for bb in bbs:
-            raw_bb_count += 1
-            try:
-                label = bb.get('label', '')
-                score = float(bb.get('value', 0.0))
+    def _publish_metadata(self):
+        """Publish latched label metadata and expose labels as a parameter."""
+        # An empty list has no inferable type, so only declare when populated.
+        if self._model.labels:
+            self.declare_parameter('class_labels', list(self._model.labels))
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = self._frame_id_override
 
-                x = int(bb.get('x', 0))
-                y = int(bb.get('y', 0))
-                w = int(bb.get('width', bb.get('w', 0)))
-                h = int(bb.get('height', bb.get('h', 0)))
+        database_location = f'{self.get_fully_qualified_name()}/class_labels'
+        self._vision_info_pub.publish(
+            conversions.make_vision_info(
+                f'edge_impulse:{self._model.model_type or "image"}',
+                database_location, header))
 
-                if self._log_raw_bounding_boxes:
-                    self.get_logger().info(
-                        f'RAW {label} ({score:.2f}): x={x} y={y} w={w} h={h}'
-                    )
+        if self._label_info_pub is not None:
+            label_info = conversions.make_label_info(
+                self._model.labels, self._model.default_threshold, header)
+            if label_info is not None:
+                self._label_info_pub.publish(label_info)
 
-                if score < self._score_threshold:
-                    continue
+    def _create_subscription(self):
+        """Subscribe to the configured image topic with the requested QoS."""
+        qos = self._resolve_qos(self._qos_name)
+        if self._compressed:
+            topic = f'{self._image_topic}/compressed'
+            self._sub = self.create_subscription(CompressedImage, topic,
+                                                 self._on_image, qos)
+        else:
+            topic = self._image_topic
+            self._sub = self.create_subscription(Image, topic, self._on_image, qos)
+        self.get_logger().info(
+            f'Subscribed to "{topic}" ({self._transport}, qos={self._qos_name})')
 
-                det = Detection2D()
-                if self._fill_detection_header:
-                    det.header = msg.header
+    @staticmethod
+    def _resolve_qos(name):
+        """Translate a QoS preset name into a QoSProfile."""
+        if str(name).lower() == 'sensor_data':
+            return qos_profile_sensor_data
+        return QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                          history=HistoryPolicy.KEEP_LAST)
 
-                bbox = BoundingBox2D()
-                # `vision_msgs/BoundingBox2D.center` differs across releases:
-                # - some use `geometry_msgs/Pose2D` (x, y, theta)
-                # - some use `geometry_msgs/Pose` (position.x, position.y)
-                cx = float(x) + float(w) / 2.0
-                cy = float(y) + float(h) / 2.0
-                center = bbox.center
-                if hasattr(center, 'x'):
-                    center.x = cx
-                    center.y = cy
-                    if hasattr(center, 'theta'):
-                        center.theta = 0.0
-                elif hasattr(center, 'position'):
-                    center.position.x = cx
-                    center.position.y = cy
-                    if hasattr(center.position, 'z'):
-                        center.position.z = 0.0
-                    if hasattr(center, 'orientation') and hasattr(center.orientation, 'w'):
-                        center.orientation.w = 1.0
-                bbox.size_x = float(w)
-                bbox.size_y = float(h)
-                det.bbox = bbox
+    # -------------------------------------------------------------- callbacks
 
-                hyp = ObjectHypothesisWithPose()
-                hyp.hypothesis = ObjectHypothesis()
-                # vision_msgs differs across ROS distros: some have `class_id` (string), others have `id` (int).
-                if hasattr(hyp.hypothesis, 'class_id'):
-                    hyp.hypothesis.class_id = str(label)
-                elif hasattr(hyp.hypothesis, 'id'):
-                    hyp.hypothesis.id = 0
-                hyp.hypothesis.score = float(score)
-                det.results.append(hyp)
+    def _on_image(self, msg):
+        """Store the newest frame, dropping any previous unprocessed one."""
+        with self._frame_lock:
+            if self._latest_msg is not None:
+                self._pending_drops += 1
+            self._latest_msg = msg
+        self._frame_event.set()
 
-                msg.detections.append(det)
-                published_bb_count += 1
-
-                if self._log_detections:
-                    self.get_logger().info(
-                        f'{label} ({score:.2f}): x={x} y={y} w={w} h={h}'
-                    )
-
-            except Exception as exc:
-                self._bb_error_count += 1
-                now = time.monotonic()
-                # Throttle to avoid log spam.
-                if (now - self._last_bb_error_log_time) > 2.0:
-                    self.get_logger().warning(
-                        f'Failed to convert/publish a bounding box (count={self._bb_error_count}): {exc}; bb={bb}'
-                    )
-                    self._last_bb_error_log_time = now
+    def _worker_loop(self):
+        """Continuously run inference on the latest available frame."""
+        while not self._shutdown.is_set():
+            if not self._frame_event.wait(timeout=0.2):
                 continue
+            self._frame_event.clear()
+            while not self._shutdown.is_set():
+                with self._frame_lock:
+                    msg = self._latest_msg
+                    self._latest_msg = None
+                    drops = self._pending_drops
+                    self._pending_drops = 0
+                if msg is None:
+                    break
+                if drops:
+                    with self._stats_lock:
+                        self._drops += drops
+                    if self._warn_on_drop:
+                        self.get_logger().warn(f'Dropped {drops} stale frame(s)')
+                self._process(msg)
 
-        if self._log_frame_summary:
-            self.get_logger().info(
-                f'Frame detections: raw={raw_bb_count} published={published_bb_count} '
-                f'timing_ms(dsp={dsp_ms:.0f}, cls={cls_ms:.0f}, anom={anom_ms:.0f}, total={total_ms:.0f})'
-            )
+    # ---------------------------------------------------------------- pipeline
 
-        if published_bb_count > 0:
-            self._frames_with_detections += 1
+    def _process(self, msg):
+        """Decode, infer and publish results for a single image message."""
+        started = time.monotonic()
+        try:
+            bgr = (image_utils.compressed_to_bgr(msg) if self._compressed
+                   else image_utils.ros_image_to_bgr(msg))
+        except Exception as exc:
+            self._record_error(f'image decode failed: {exc}')
+            return
 
+        try:
+            features, transform, _ = image_utils.preprocess(
+                bgr, self._model.input_width, self._model.input_height,
+                self._resize_mode, self._model.grayscale)
+            envelope = self._runner.classify(features)
+        except Exception as exc:
+            self._record_error(f'inference failed: {exc}')
+            return
+
+        result = envelope.get('result', {}) if isinstance(envelope, dict) else {}
+        timing = envelope.get('timing', {}) if isinstance(envelope, dict) else {}
+
+        header = Header()
+        header.stamp = msg.header.stamp
+        header.frame_id = self._frame_id_override or msg.header.frame_id
+
+        boxes = None
+        if self._detections_pub is not None:
+            boxes = conversions.extract_boxes(result, self._threshold, transform)
+            self._detections_pub.publish(conversions.make_detection_array(boxes, header))
+
+        if self._classification_pub is not None:
+            items = conversions.extract_classification(result, self._threshold)
+            self._classification_pub.publish(conversions.make_classification(items, header))
+
+        anomaly = None
+        if self._anomaly_pub is not None:
+            anomaly = conversions.extract_anomaly(result)
+            if anomaly is not None:
+                self._anomaly_pub.publish(Float32(data=float(anomaly[0])))
+
+        if self._debug_pub is not None:
+            self._publish_debug_image(bgr, boxes, result, header)
+
+        latency_ms = (time.monotonic() - started) * 1000.0
+        with self._stats_lock:
+            self._frames += 1
+            self._last_latency_ms = latency_ms
+            self._ei_timing = timing if isinstance(timing, dict) else {}
+            self._last_anomaly = anomaly
+            self._last_error = ''
+
+    def _publish_debug_image(self, bgr, boxes, result, header):
+        """Render and publish an annotated copy of the input frame."""
+        overlay = [(b.label, b.score, b.x, b.y, b.w, b.h) for b in (boxes or [])]
+        annotated = image_utils.draw_detections(bgr, overlay, self._overlay_labels)
+        if not overlay and self._overlay_labels:
+            items = conversions.extract_classification(result, None)
+            if items:
+                annotated = image_utils.draw_caption(
+                    annotated, f'{items[0][0]} {items[0][1]:.2f}')
+        self._debug_pub.publish(image_utils.bgr_to_ros_image(annotated, header))
+
+    def _record_error(self, message):
+        """Log (throttled) and remember the most recent processing error."""
+        self.get_logger().error(message, throttle_duration_sec=2.0)
+        with self._stats_lock:
+            self._last_error = message
+
+    def _publish_diagnostics(self):
+        """Publish a DiagnosticArray summarising throughput and model health."""
         now = time.monotonic()
-        if self._status_period_sec > 0 and (now - self._last_status_time) >= self._status_period_sec:
-            self.get_logger().info(
-                f'Frames={self._frames_total} frames_with_detections={self._frames_with_detections} '
-                f'last_raw_boxes={raw_bb_count} last_published_boxes={published_bb_count}'
-            )
-            self._last_status_time = now
+        with self._stats_lock:
+            frames = self._frames
+            drops = self._drops
+            latency = self._last_latency_ms
+            timing = dict(self._ei_timing)
+            anomaly = self._last_anomaly
+            last_error = self._last_error
+            window = frames - self._diag_last_frames
+            elapsed = now - self._diag_last_time
+            self._diag_last_frames = frames
+            self._diag_last_time = now
+        fps = (window / elapsed) if elapsed > 0 else 0.0
 
-        if published_bb_count > 0 or self._publish_empty:
-            self._pub.publish(msg)
+        status = DiagnosticStatus()
+        status.name = f'{self.get_name()}: inference'
+        status.hardware_id = self._model.name or 'edge_impulse'
+        if last_error:
+            status.level = DiagnosticStatus.ERROR
+            status.message = last_error
+        elif frames == 0:
+            status.level = DiagnosticStatus.WARN
+            status.message = 'waiting for images'
+        else:
+            status.level = DiagnosticStatus.OK
+            status.message = f'{fps:.1f} FPS'
+        status.values = [
+            KeyValue(key='model', value=f'{self._model.owner}/{self._model.name}'),
+            KeyValue(key='model_type', value=self._model.model_type),
+            KeyValue(key='frames', value=str(frames)),
+            KeyValue(key='dropped_frames', value=str(drops)),
+            KeyValue(key='fps', value=f'{fps:.2f}'),
+            KeyValue(key='latency_ms', value=f'{latency:.1f}'),
+            KeyValue(key='dsp_ms', value=str(timing.get('dsp', ''))),
+            KeyValue(key='classification_ms', value=str(timing.get('classification', ''))),
+            KeyValue(key='anomaly_ms', value=str(timing.get('anomaly', ''))),
+        ]
+        if anomaly is not None:
+            status.values.append(KeyValue(key='anomaly_max', value=f'{anomaly[0]:.3f}'))
+            status.values.append(KeyValue(key='anomaly_mean', value=f'{anomaly[1]:.3f}'))
 
-        if self._publish_count:
-            count_msg = Int32()
-            count_msg.data = int(published_bb_count)
-            self._count_pub.publish(count_msg)
+        array = DiagnosticArray()
+        array.header.stamp = self.get_clock().now().to_msg()
+        array.status.append(status)
+        self._diag_pub.publish(array)
 
-        if self._publish_timing:
-            timing_msg = String()
-            # Keep this simple and stable: one line JSON with the key numbers.
-            timing_msg.data = (
-                '{'
-                f'"dsp_ms":{dsp_ms},"classification_ms":{cls_ms},"anomaly_ms":{anom_ms},'
-                f'"total_ms":{total_ms},"raw_boxes":{raw_bb_count},"published_boxes":{published_bb_count}'
-                '}'
-            )
-            self._timing_pub.publish(timing_msg)
+    # ---------------------------------------------------------------- shutdown
 
     def destroy_node(self):
-        # signal runner thread to stop
-        try:
-            self._stop_event.set()
-            if self._runner:
-                try:
-                    self._runner.stop()
-                except Exception:
-                    pass
-            if self._thread.is_alive():
-                self._thread.join(timeout=2.0)
-        except Exception:
-            pass
+        """Stop the worker thread and the model process, then tear down."""
+        self._shutdown.set()
+        self._frame_event.set()
+        worker = getattr(self, '_worker', None)
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=3.0)
+        runner = getattr(self, '_runner', None)
+        if runner is not None:
+            runner.stop()
         super().destroy_node()
 
 
 def main(args=None):
+    """Console-script entry point for the ``edgeimpulse_detector`` executable."""
     rclpy.init(args=args)
+    node = None
     try:
         node = EdgeImpulseDetector()
-    except Exception as e:
-        print('Failed to start node:', e)
-        rclpy.shutdown()
+    except Exception as exc:  # noqa: BLE001 - surface any startup failure cleanly
+        print(f'[edgeimpulse_detector] failed to start: {exc}', file=sys.stderr)
+        rclpy.try_shutdown()
         return
     try:
         rclpy.spin(node)
@@ -270,9 +404,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        # Avoid crashing if shutdown already happened (e.g. launch signal handling).
-        try:
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()
