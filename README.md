@@ -1,23 +1,29 @@
 # edgeimpulse_ros
 
-[![CI](https://github.com/edgeimpulse/edgeimpulse-ros/actions/workflows/ci.yml/badge.svg)](https://github.com/edgeimpulse/edgeimpulse-ros/actions/workflows/ci.yml)
-
 Run [Edge Impulse](https://www.edgeimpulse.com) models in ROS 2. This package
 turns an exported `.eim` model into a **camera-agnostic perception node**: it
 consumes standard `sensor_msgs/Image` frames from *any* camera driver and
 publishes idiomatic [`vision_msgs`](https://github.com/ros-perception/vision_msgs)
 results that RViz, Foxglove and the rest of the ROS ecosystem understand.
 
-> Rewritten from the ground up. The node no longer opens a camera directly —
-> it subscribes to an image topic, which is the standard ROS perception
-> pattern and lets you reuse your existing camera pipeline.
+> The node subscribes to an image topic rather than opening a camera itself —
+> the standard ROS perception pattern — so it drops into the camera pipeline you
+> already run and works with any driver.
+
+![Edge Impulse object detection running live in ROS 2, shown in rqt_image_view](docs/images/detection_debug.png)
+
+<!-- TODO(screenshots): add PNGs under docs/images/ to replace these placeholders:
+       detection_debug.png  - object-detection boxes on ~/debug_image
+       anomaly_debug.png    - visual-anomaly red boxes on ~/debug_image
+       rviz_detections.png  - Detection2DArray visualised in RViz/Foxglove -->
 
 ## Why this design
 
-The previous version opened a V4L2 camera inside the node via the Edge Impulse
-Linux SDK. That couples inference to one device, can't reuse an existing camera
-node, and re-stamps messages with fresh timestamps (which breaks TF and sensor
-fusion). This version fixes all of that:
+The node is a pure inference processor: images in, `vision_msgs` out. A separate
+camera driver supplies the frames — the standard ROS perception pattern — which
+keeps inference decoupled from any specific device, lets you reuse the camera
+pipeline you already run, and preserves each frame's original timestamp and
+`frame_id` so TF lookups and sensor fusion keep working:
 
 ```mermaid
 flowchart LR
@@ -106,6 +112,8 @@ ros2 topic echo /edgeimpulse_detector/detections
 ros2 run rqt_image_view rqt_image_view /edgeimpulse_detector/debug_image
 ```
 
+![Detections streamed as vision_msgs and the annotated debug image](docs/images/rviz_detections.png)
+
 ## Use with your own camera
 
 Run the node standalone and point it at an existing image topic:
@@ -129,6 +137,17 @@ ros2 launch edgeimpulse_ros edgeimpulse_detector.launch.py \
   image_topic:=/qrb_camera/image \
   image_qos:=sensor_data
 ```
+
+### Anomaly detection (FOMO-AD)
+
+Visual-anomaly models publish two things: the per-region anomaly grid as boxes
+on `~/detections`, and the frame's peak anomaly score as a `std_msgs/Float32`
+on `~/anomaly`. The score is Edge Impulse's raw anomaly value — it is **not**
+normalised to 0–1, and higher means more anomalous — so choose a threshold that
+suits your model. On the debug image the flagged regions are drawn as plain red
+boxes (no text).
+
+![Visual anomaly detection highlighting defects on the debug image](docs/images/anomaly_debug.png)
 
 ## Published topics
 
@@ -166,7 +185,7 @@ Class labels are also exposed as the `class_labels` parameter, referenced by
 | `resize_mode` | string | `auto` | `auto`, `squash`, `fit-shortest`, `fit-longest`. `auto` uses the Studio setting. |
 | `confidence_threshold` | double | `-1.0` | Minimum score to publish; `<0` uses the model's own threshold. |
 | `publish_debug_image` | bool | `false` | Publish an annotated debug image. |
-| `overlay_labels` | bool | `true` | Draw labels/scores on the debug image. |
+| `overlay_labels` | bool | `true` | Draw class labels on detection boxes (scores are omitted; visual-anomaly boxes are drawn without text). |
 | `frame_id_override` | string | `""` | Override the source image `frame_id` if non-empty. |
 | `publish_diagnostics` | bool | `true` | Publish `DiagnosticArray`. |
 | `diagnostic_period` | double | `1.0` | Diagnostics period (s). |

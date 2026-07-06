@@ -17,6 +17,10 @@ KIND_DETECTION = 'detection'
 KIND_CLASSIFICATION = 'classification'
 KIND_ANOMALY = 'anomaly'
 
+# Edge Impulse ``has_anomaly`` metadata: 0 = none, 1 = K-means, 2 = GMM
+# (both scalar); >= 3 is visual anomaly (FOMO-AD), which also emits a grid.
+_VISUAL_ANOMALY_MIN = 3
+
 
 @dataclass
 class ModelInfo:
@@ -29,7 +33,7 @@ class ModelInfo:
     input_height: int = 0
     channel_count: int = 3
     labels: List[str] = field(default_factory=list)
-    has_anomaly: bool = False
+    has_anomaly: int = 0
     resize_mode: str = 'fit-shortest'
     default_threshold: float = 0.0
     raw: Dict = field(default_factory=dict)
@@ -45,12 +49,20 @@ class ModelInfo:
         return self.input_width > 0 and self.input_height > 0
 
     @property
+    def has_visual_anomaly(self) -> bool:
+        """Return ``True`` for visual (FOMO-AD) anomaly models with a grid."""
+        return self.has_anomaly >= _VISUAL_ANOMALY_MIN
+
+    @property
     def output_kinds(self) -> set:
         """Set of :data:`KIND_*` values this model can emit."""
         kinds = set()
+        if self.has_visual_anomaly:
+            # FOMO-AD emits a spatial grid (-> detections) plus a score.
+            return {KIND_DETECTION, KIND_ANOMALY}
         if self.model_type in ('object_detection', 'constrained_object_detection'):
             kinds.add(KIND_DETECTION)
-        if self.model_type == 'classification':
+        elif self.model_type == 'classification':
             kinds.add(KIND_CLASSIFICATION)
         if self.has_anomaly:
             kinds.add(KIND_ANOMALY)
@@ -75,7 +87,7 @@ def parse_model_info(raw: dict) -> ModelInfo:
         input_height=int(params.get('image_input_height', 0) or 0),
         channel_count=int(params.get('image_channel_count', 3) or 3),
         labels=list(params.get('labels', []) or []),
-        has_anomaly=bool(params.get('has_anomaly', 0)),
+        has_anomaly=int(params.get('has_anomaly', 0) or 0),
         resize_mode=str(params.get('image_resize_mode', 'fit-shortest') or 'fit-shortest'),
         default_threshold=float(params.get('threshold', 0.0) or 0.0),
         raw=raw if isinstance(raw, dict) else {},

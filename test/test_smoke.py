@@ -120,9 +120,26 @@ def test_classification_publishes_scores():
 
 def test_anomaly_publishes_score():
     """A model with anomaly republishes the max score as Float32."""
-    result = {'result': {'classification': {'cat': 0.8, 'dog': 0.2},
-                          'anomaly': 0.42}}
+    result = {
+        'result': {'classification': {'cat': 0.8, 'dog': 0.2}, 'anomaly': 0.42},
+    }
     msg = _capture(_model('classification', ['cat', 'dog'], has_anomaly=1),
                    result, Float32, '/edgeimpulse_detector/anomaly')
     assert msg is not None, 'no anomaly Float32 within 10s'
     assert abs(msg.data - 0.42) < 1e-4
+
+
+def test_visual_anomaly_publishes_grid_boxes():
+    """A visual-anomaly (FOMO-AD) model republishes grid cells as detections."""
+    result = {'result': {
+        'visual_anomaly_grid': [
+            {'label': 'anomaly', 'value': 6.0,
+             'x': 4, 'y': 4, 'width': 8, 'height': 8}],
+        'visual_anomaly_max': 6.0,
+        'visual_anomaly_mean': 3.0,
+    }}
+    msg = _capture(_model('classification', [], has_anomaly=4), result,
+                   Detection2DArray, '/edgeimpulse_detector/detections')
+    assert msg is not None, 'no Detection2DArray within 10s'
+    assert len(msg.detections) == 1
+    assert msg.detections[0].results[0].hypothesis.class_id == 'anomaly'

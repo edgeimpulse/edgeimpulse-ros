@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.ros_distribution }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ros_distribution: [ jazzy, rolling ]
+    container:
+      image: ros:${{ matrix.ros_distribution }}-ros-base
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Build and test edgeimpulse_ros
+        uses: ros-tooling/action-ros-ci@v0.3
+        with:
+          package-name: edgeimpulse_ros
+          target-ros2-distro: ${{ matrix.ros_distribution }}

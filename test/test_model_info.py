@@ -38,6 +38,14 @@ def test_parse_classification_with_anomaly():
         model_runner.KIND_CLASSIFICATION, model_runner.KIND_ANOMALY}
 
 
+def test_parse_visual_anomaly():
+    """A visual-anomaly (FOMO-AD) model emits detection + anomaly kinds."""
+    info = model_runner.parse_model_info(_sample('classification', has_anomaly=4))
+    assert info.has_visual_anomaly
+    assert info.output_kinds == {
+        model_runner.KIND_DETECTION, model_runner.KIND_ANOMALY}
+
+
 def test_parse_grayscale_flag():
     """A single-channel model reports grayscale."""
     info = model_runner.parse_model_info(_sample('classification', channels=1))

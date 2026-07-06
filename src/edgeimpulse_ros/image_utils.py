@@ -229,12 +229,11 @@ def draw_detections(bgr: np.ndarray, detections, draw_labels: bool = True) -> np
     for label, score, x, y, w, h in detections:
         p1 = (int(round(x)), int(round(y)))
         p2 = (int(round(x + w)), int(round(y + h)))
-        cv2.rectangle(out, p1, p2, (0, 255, 0), 2)
+        cv2.rectangle(out, p1, p2, (0, 0, 255), 2)
         if draw_labels:
-            caption = f'{label} {score:.2f}'
             ty = max(0, p1[1] - 6)
-            cv2.putText(out, caption, (p1[0], ty), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 255, 0), 1, cv2.LINE_AA)
+            cv2.putText(out, str(label), (p1[0], ty), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 0, 255), 1, cv2.LINE_AA)
     return out
 
 
@@ -242,7 +241,7 @@ def draw_caption(bgr: np.ndarray, text: str) -> np.ndarray:
     """Return a copy of ``bgr`` with ``text`` drawn in the top-left corner."""
     out = bgr.copy()
     cv2.putText(out, text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (0, 255, 0), 2, cv2.LINE_AA)
+                0.7, (0, 0, 255), 2, cv2.LINE_AA)
     return out
 
 

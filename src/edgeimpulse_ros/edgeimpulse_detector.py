@@ -102,7 +102,8 @@ class EdgeImpulseDetector(Node):
             f'type={self._model.model_type or "?"} '
             f'input={self._model.input_width}x{self._model.input_height} '
             f'{"gray" if self._model.grayscale else "rgb"} '
-            f'resize={self._resize_mode} labels={self._model.labels}')
+            f'resize={self._resize_mode} has_anomaly={self._model.has_anomaly} '
+            f'kinds={sorted(self._kinds)} labels={self._model.labels}')
 
         if not self._model.is_image_model:
             raise RuntimeError(
@@ -126,6 +127,7 @@ class EdgeImpulseDetector(Node):
         self._ei_timing = {}
         self._last_anomaly = None
         self._last_error = ''
+        self._logged_result = False
         self._diag_last_frames = 0
         self._diag_last_time = time.monotonic()
 
@@ -278,6 +280,10 @@ class EdgeImpulseDetector(Node):
         result = envelope.get('result', {}) if isinstance(envelope, dict) else {}
         timing = envelope.get('timing', {}) if isinstance(envelope, dict) else {}
 
+        if not self._logged_result and isinstance(result, dict):
+            self._logged_result = True
+            self.get_logger().info(f'First inference result keys: {sorted(result)}')
+
         header = Header()
         header.stamp = msg.header.stamp
         header.frame_id = self._frame_id_override or msg.header.frame_id
@@ -311,7 +317,9 @@ class EdgeImpulseDetector(Node):
     def _publish_debug_image(self, bgr, boxes, result, header):
         """Render and publish an annotated copy of the input frame."""
         overlay = [(b.label, b.score, b.x, b.y, b.w, b.h) for b in (boxes or [])]
-        annotated = image_utils.draw_detections(bgr, overlay, self._overlay_labels)
+        # Visual anomaly boxes are all the same class, so skip their labels.
+        draw_labels = self._overlay_labels and not self._model.has_visual_anomaly
+        annotated = image_utils.draw_detections(bgr, overlay, draw_labels)
         if not overlay and self._overlay_labels:
             items = conversions.extract_classification(result, None)
             if items:

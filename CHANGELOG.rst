@@ -2,10 +2,11 @@
 Changelog for package edgeimpulse_ros
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.0.0 (2026-07-03)
+1.0.0 (2026-07-06)
 ------------------
-* Rewrote the package around a camera-agnostic design: the node subscribes to a
-  ``sensor_msgs/Image`` topic from any driver instead of opening a camera.
+* Initial public release.
+* Camera-agnostic design: the node subscribes to a ``sensor_msgs/Image`` topic
+  from any camera driver and runs an Edge Impulse ``.eim`` model on each frame.
 * Added an encoding normaliser that decodes ``bgr8`` / ``rgb8`` / ``mono8`` /
   ``mono16`` / ``bgra8`` / ``rgba8`` / ``yuyv`` / ``uyvy`` and ``nv12`` /
   ``nv21`` without ``cv_bridge`` (fixes the Qualcomm QRB NV12 workflow).
