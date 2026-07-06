@@ -26,6 +26,7 @@ setup(
     entry_points={
         'console_scripts': [
             'edgeimpulse_detector = edgeimpulse_ros.edgeimpulse_detector:main',
+            'nv12_test_publisher = edgeimpulse_ros.nv12_publisher:main',
         ],
     },
 )

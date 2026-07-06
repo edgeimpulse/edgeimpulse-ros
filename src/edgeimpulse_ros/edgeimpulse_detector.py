@@ -53,9 +53,9 @@ def _normalize_resize_mode(mode: str, fallback: str = 'fit-shortest') -> str:
 class EdgeImpulseDetector(Node):
     """ROS 2 node wrapping a single Edge Impulse image model."""
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         """Declare parameters, load the model and wire up ROS entities."""
-        super().__init__('edgeimpulse_detector')
+        super().__init__('edgeimpulse_detector', **kwargs)
 
         model_path = self._declare('model_path', '',
                                    'Path to the Edge Impulse .eim model (required)')

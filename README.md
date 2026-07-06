@@ -1,5 +1,7 @@
 # edgeimpulse_ros
 
+[![CI](https://github.com/edgeimpulse/edgeimpulse-ros/actions/workflows/ci.yml/badge.svg)](https://github.com/edgeimpulse/edgeimpulse-ros/actions/workflows/ci.yml)
+
 Run [Edge Impulse](https://www.edgeimpulse.com) models in ROS 2. This package
 turns an exported `.eim` model into a **camera-agnostic perception node**: it
 consumes standard `sensor_msgs/Image` frames from *any* camera driver and
@@ -56,7 +58,9 @@ flowchart LR
 
 ## Requirements
 
-- ROS 2 (Humble, Iron, Jazzy or Rolling).
+- ROS 2 **Jazzy** or **Rolling** (modern `vision_msgs` 4.x). Humble support is
+  on the roadmap — the legacy `vision_msgs` fallbacks exist but aren't validated
+  in CI yet.
 - The Edge Impulse Linux Python SDK in the same interpreter as ROS.
 - OpenCV and NumPy Python bindings.
 
@@ -206,6 +210,19 @@ colcon test-result --verbose
 The image math and message converters are unit tested without a camera or a
 model; `flake8` and `pep257` enforce style.
 
+### Validate the NV12 path without hardware
+
+`qrb_ros_camera` emits `nv12`. To exercise that decode path without a Qualcomm
+board, publish synthetic NV12 frames with the bundled helper and point the
+detector at them:
+
+```bash
+ros2 run edgeimpulse_ros nv12_test_publisher            # publishes nv12 on /image
+ros2 run edgeimpulse_ros edgeimpulse_detector --ros-args \
+  -p model_path:=/path/to/model.eim -p publish_debug_image:=true
+ros2 run rqt_image_view rqt_image_view /edgeimpulse_detector/debug_image
+```
+
 ## Troubleshooting
 
 - **`failed to start: ... dependency "pyaudio" is missing`** — the Edge Impulse
@@ -215,6 +232,8 @@ model; `flake8` and `pep257` enforce style.
 - **`failed to start: The Edge Impulse Linux SDK is required at runtime`** —
   install the SDK into the interpreter ROS uses:
   `pip install --user --break-system-packages edge_impulse_linux`.
+- **`failed to start: Model file ... is not executable`** — the `.eim` is a
+  native binary and needs the exec bit: `chmod +x /path/to/model.eim`.
 - **No messages on `~/detections`** — confirm the camera is publishing
   (`ros2 topic hz <image_topic>`) and that `image_qos` is compatible (a
   `reliable` subscriber cannot receive from a `best_effort` publisher; the
