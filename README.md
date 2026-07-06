@@ -10,7 +10,7 @@ results that RViz, Foxglove and the rest of the ROS ecosystem understand.
 > the standard ROS perception pattern — so it drops into the camera pipeline you
 > already run and works with any driver.
 
-![Edge Impulse object detection running live in ROS 2, shown in rqt_image_view](docs/images/detection_debug.png)
+![Edge Impulse object detection running live in ROS 2](docs/images/ros2_object_tracking.gif)
 
 <!-- TODO(screenshots): add PNGs under docs/images/ to replace these placeholders:
        detection_debug.png  - object-detection boxes on ~/debug_image
@@ -112,7 +112,7 @@ ros2 topic echo /edgeimpulse_detector/detections
 ros2 run rqt_image_view rqt_image_view /edgeimpulse_detector/debug_image
 ```
 
-![Detections streamed as vision_msgs and the annotated debug image](docs/images/rviz_detections.png)
+![Detections streamed as vision_msgs and the annotated debug image](docs/images/Screenshot_object_detection.png)
 
 ## Use with your own camera
 
@@ -147,7 +147,7 @@ normalised to 0–1, and higher means more anomalous — so choose a threshold t
 suits your model. On the debug image the flagged regions are drawn as plain red
 boxes (no text).
 
-![Visual anomaly detection highlighting defects on the debug image](docs/images/anomaly_debug.png)
+![Visual anomaly detection highlighting defects on the debug image](docs/images/Screenshot_anomaly.png)
 
 ## Published topics
 
