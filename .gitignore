@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# macOS / editor / tooling cruft
+.DS_Store
+.qodo/
+
 # C extensions
 *.so
 
