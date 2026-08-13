@@ -240,6 +240,24 @@ ros2 topic pub --once /trigger std_msgs/String \
   "data: '{\"category\": \"training\", \"label\": \"cat\", \"filename\": \"sample\"}'"
 ```
 
+Or publish the trigger from Python (e.g. from another node's callback):
+
+```python
+import json
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+rclpy.init()
+node = Node('ingestion_trigger_example')
+pub = node.create_publisher(String, 'trigger', 10)
+
+msg = String()
+msg.data = json.dumps({'category': 'training', 'label': 'cat', 'filename': 'sample'})
+pub.publish(msg)
+```
+
 | Field | Required | Description |
 | --- | --- | --- |
 | `category` | no (default `training`) | `training`, `testing` or `split`. |
