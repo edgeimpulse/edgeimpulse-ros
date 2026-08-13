@@ -6,6 +6,7 @@ import time
 import io
 import cv2
 import requests
+import json
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from edgeimpulse_ros import conversions, image_utils
@@ -26,7 +27,8 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Float32, Header, Bool
+from std_msgs.msg import Float32, String
+
 
 MAX_RECONNECT_ATTEMPTS = 5
 EI_INGEST_URL = "https://ingestion.edgeimpulse.com/api/"
@@ -103,7 +105,7 @@ class EdgeImpulseIngestion(Node):
         else:
             topic = self._image_topic
             self._sub = self.create_subscription(Image, topic, self._on_image, qos)
-        self._trigger = self.create_subscription(Bool, 'trigger', self._on_trigger, qos)
+        self._trigger = self.create_subscription(String, 'trigger', self._on_trigger, qos)
         self.get_logger().info(
             f'Subscribed to "{topic}" ({self._transport}, qos={self._qos_name})')
 
@@ -132,18 +134,28 @@ class EdgeImpulseIngestion(Node):
 
     def _on_trigger(self, msg):
         """Trigger the ingestion of the latest frame."""
+        # trigger should container
+        # category
+        # optional label
+        # filename
+        # parse the trigger message and send the latest frame to edge impulse
+        items = json.loads(msg.data)
+
         if self._latest_msg is not None:
             print(f"Trigger received, ingesting frame at {self._latest_msg.header.stamp.sec}.{self._latest_msg.header.stamp.nanosec}")
-            self._send_to_edge_impulse(self._latest_msg)
+            print(f"Trigger items: {items}")
+            self._send_to_edge_impulse(self._latest_msg, category=items.get('category', 'training'), label=items.get('label', None), filename=items.get('filename', None))
         if msg.data:
             self._frame_event.set()
 
     # ---------------------------------------------------------------- pipeline
 
-    def _send_to_edge_impulse(self, msg):
+    def _send_to_edge_impulse(self, msg, category='training', label=None, filename=None):
         """Send the image to Edge Impulse ingestion endpoint."""
-        category = 'training'
         bgr = None
+
+        if category not in ['training', 'testing', 'split']:
+            return ({'status': 'error', 'message': 'Invalid category'}), 400
 
         try:
             bgr = (image_utils.compressed_to_bgr(msg) if self._compressed
@@ -157,7 +169,7 @@ class EdgeImpulseIngestion(Node):
         if not ok:
             return ({'status': 'error', 'message': 'Failed to encode JPEG'}), 500
 
-        filename = f"original-{int(time.time())}.jpg"
+        filename = f"{filename}-{int(time.time())}.jpg"
         files = {'data': (filename, io.BytesIO(buffer.tobytes()), 'image/jpeg')}
         headers = {'x-api-key': self._api_key}
         url = EI_INGEST_URL + f"{category}/files"
