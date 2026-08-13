@@ -1,102 +1,100 @@
+"""
+Edge Impulse ingestion node: image topic in, labelled samples uploaded out.
+
+This node subscribes to a standard ``sensor_msgs/Image`` (or
+``CompressedImage``) topic and keeps the latest frame in memory. When a
+``std_msgs/String`` JSON trigger message arrives on the ``trigger`` topic, the
+latest frame is uploaded to the Edge Impulse ingestion API as a training,
+testing or split sample.
+"""
+
 from __future__ import annotations
 
+import io
+import json
 import sys
 import threading
 import time
-import io
+
 import cv2
 import requests
-import json
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from edgeimpulse_ros import conversions, image_utils
-from edgeimpulse_ros.model_runner import (
-    KIND_ANOMALY,
-    KIND_CLASSIFICATION,
-    KIND_DETECTION,
-    ModelRunner,
-)
+from edgeimpulse_ros import image_utils
 from rcl_interfaces.msg import ParameterDescriptor
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
-    DurabilityPolicy,
     HistoryPolicy,
     qos_profile_sensor_data,
     QoSProfile,
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Float32, String
+from std_msgs.msg import String
 
 
-MAX_RECONNECT_ATTEMPTS = 5
-EI_INGEST_URL = "https://ingestion.edgeimpulse.com/api/"
-EI_STUDIO_BASE_URL = "https://studio.edgeimpulse.com/v1"
+EI_INGEST_URL = 'https://ingestion.edgeimpulse.com/api/'
+INGEST_CATEGORIES = ('training', 'testing', 'split')
+
 
 class EdgeImpulseIngestion(Node):
-    """ROS 2 node for data ingestion to Edge Impulse"""
+    """ROS 2 node that uploads triggered camera frames to Edge Impulse."""
 
     def __init__(self, **kwargs):
-        """Declare parameters, load the model and wire up ROS entities."""
+        """Declare parameters and wire up ROS entities."""
         super().__init__('edgeimpulse_ingestion', **kwargs)
 
         self._api_key = self._declare('api_key', '',
-                                        'Edge Impulse ingestion API key')
+                                       'Edge Impulse ingestion API key')
         self._image_topic = self._declare('image_topic', 'image',
-                                          'Input image topic to subscribe to')
+                                           'Input image topic to subscribe to')
         self._transport = self._declare('image_transport', 'raw',
-                                        'Image transport: "raw" or "compressed"')
+                                         'Image transport: "raw" or "compressed"')
         self._qos_name = self._declare('image_qos', 'sensor_data',
-                                       'Subscriber QoS: sensor_data | reliable | default')
+                                        'Subscriber QoS: sensor_data | reliable | default')
         self._publish_diag = bool(self._declare('publish_diagnostics', True,
-                                                'Publish diagnostic_msgs/DiagnosticArray'))
+                                                 'Publish diagnostic_msgs/DiagnosticArray'))
         diag_period = float(self._declare('diagnostic_period', 1.0,
-                                          'Diagnostics publish period in seconds'))
-        print(self._api_key)
+                                           'Diagnostics publish period in seconds'))
+
         if not self._api_key:
-            raise RuntimeError('Parameter "api_key" must be set to a valid Edge Impulse ingestion API key')
+            raise RuntimeError(
+                'Parameter "api_key" must be set to a valid Edge Impulse ingestion API key')
 
         self._compressed = str(self._transport).lower() == 'compressed'
 
-        # --- Load the model up front so startup fails fast on a bad path. ---
-        self.get_logger().info(
-            f'Ingestion ready to receive data')
-
         self._setup_publishers()
-        #self._publish_metadata()
 
-        # --- Threading / frame handoff state (latest-frame-wins). ---
         self._frame_lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._latest_msg = None
-        self._pending_drops = 0
-        self._frame_event = threading.Event()
-        self._shutdown = threading.Event()
 
-        self._frames = 0
-        self._drops = 0
+        self._frames_received = 0
+        self._uploads_sent = 0
+        self._uploads_failed = 0
         self._last_error = ''
-        self._logged_result = False
-        self._diag_last_frames = 0
-        self._diag_last_time = time.monotonic()
 
         self._create_subscription()
 
-        #self._worker = threading.Thread(target=self._worker_loop, name='ei_inference',
-        #                                daemon=True)
-        #self._worker.start()
-
         if self._publish_diag and diag_period > 0.0:
             self._diag_timer = self.create_timer(diag_period, self._publish_diagnostics)
+
+        self.get_logger().info('Ingestion node ready to receive triggers')
 
     def _declare(self, name, default, description):
         """Declare a described parameter and return its initial value."""
         self.declare_parameter(name, default, ParameterDescriptor(description=description))
         return self.get_parameter(name).value
 
+    def _setup_publishers(self):
+        """Create the diagnostics publisher, if enabled."""
+        self._diag_pub = None
+        if self._publish_diag:
+            self._diag_pub = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
+
     def _create_subscription(self):
-        """Subscribe to the configured image topic with the requested QoS."""
+        """Subscribe to the configured image topic and the trigger topic."""
         qos = self._resolve_qos(self._qos_name)
         if self._compressed:
             topic = f'{self._image_topic}/compressed'
@@ -105,7 +103,7 @@ class EdgeImpulseIngestion(Node):
         else:
             topic = self._image_topic
             self._sub = self.create_subscription(Image, topic, self._on_image, qos)
-        self._trigger = self.create_subscription(String, 'trigger', self._on_trigger, qos)
+        self._trigger_sub = self.create_subscription(String, 'trigger', self._on_trigger, qos)
         self.get_logger().info(
             f'Subscribed to "{topic}" ({self._transport}, qos={self._qos_name})')
 
@@ -116,11 +114,6 @@ class EdgeImpulseIngestion(Node):
             return qos_profile_sensor_data
         return QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
                           history=HistoryPolicy.KEEP_LAST)
-
-    def _setup_publishers(self):
-        self._diag_pub = None
-        if self._publish_diag:
-            self._diag_pub = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
 
     # -------------------------------------------------------------- callbacks
 
