@@ -17,8 +17,6 @@ import threading
 import time
 
 import cv2
-import requests
-
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from edgeimpulse_ros import image_utils
 from rcl_interfaces.msg import ParameterDescriptor
@@ -30,6 +28,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
+import requests
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
@@ -46,17 +45,17 @@ class EdgeImpulseIngestion(Node):
         super().__init__('edgeimpulse_ingestion', **kwargs)
 
         self._api_key = self._declare('api_key', '',
-                                       'Edge Impulse ingestion API key')
+                                      'Edge Impulse ingestion API key')
         self._image_topic = self._declare('image_topic', 'image',
-                                           'Input image topic to subscribe to')
+                                          'Input image topic to subscribe to')
         self._transport = self._declare('image_transport', 'raw',
-                                         'Image transport: "raw" or "compressed"')
+                                        'Image transport: "raw" or "compressed"')
         self._qos_name = self._declare('image_qos', 'sensor_data',
-                                        'Subscriber QoS: sensor_data | reliable | default')
+                                       'Subscriber QoS: sensor_data | reliable | default')
         self._publish_diag = bool(self._declare('publish_diagnostics', True,
-                                                 'Publish diagnostic_msgs/DiagnosticArray'))
+                                                'Publish diagnostic_msgs/DiagnosticArray'))
         diag_period = float(self._declare('diagnostic_period', 1.0,
-                                           'Diagnostics publish period in seconds'))
+                                          'Diagnostics publish period in seconds'))
 
         if not self._api_key:
             raise RuntimeError(
@@ -118,60 +117,79 @@ class EdgeImpulseIngestion(Node):
     # -------------------------------------------------------------- callbacks
 
     def _on_image(self, msg):
-        """Store the newest frame, dropping any previous unprocessed one."""
+        """Store the newest received frame for on-demand ingestion."""
         with self._frame_lock:
-            if self._latest_msg is not None:
-                self._pending_drops += 1
             self._latest_msg = msg
-        self._frame_event.set()
+        with self._stats_lock:
+            self._frames_received += 1
 
     def _on_trigger(self, msg):
-        """Trigger the ingestion of the latest frame."""
-        # trigger should container
-        # category
-        # optional label
-        # filename
-        # parse the trigger message and send the latest frame to edge impulse
-        items = json.loads(msg.data)
+        """Parse a trigger message and upload the latest frame to Edge Impulse."""
+        try:
+            items = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError) as exc:
+            self._record_error(f'invalid trigger payload: {exc}')
+            return
 
-        if self._latest_msg is not None:
-            print(f"Trigger received, ingesting frame at {self._latest_msg.header.stamp.sec}.{self._latest_msg.header.stamp.nanosec}")
-            print(f"Trigger items: {items}")
-            self._send_to_edge_impulse(self._latest_msg, category=items.get('category', 'training'), label=items.get('label', None), filename=items.get('filename', None))
-        if msg.data:
-            self._frame_event.set()
+        with self._frame_lock:
+            latest_msg = self._latest_msg
+        if latest_msg is None:
+            self._record_error('trigger received but no image has arrived yet')
+            return
+
+        category = items.get('category', 'training')
+        label = items.get('label')
+        filename = items.get('filename')
+        self.get_logger().info(
+            f'Trigger received: category={category} label={label} filename={filename}')
+        self._send_to_edge_impulse(latest_msg, category=category, label=label, filename=filename)
 
     # ---------------------------------------------------------------- pipeline
 
     def _send_to_edge_impulse(self, msg, category='training', label=None, filename=None):
-        """Send the image to Edge Impulse ingestion endpoint."""
-        bgr = None
-
-        if category not in ['training', 'testing', 'split']:
-            return ({'status': 'error', 'message': 'Invalid category'}), 400
+        """Upload a single frame to the Edge Impulse ingestion API."""
+        if category not in INGEST_CATEGORIES:
+            self._record_error(f'invalid ingestion category "{category}"')
+            return False
 
         try:
             bgr = (image_utils.compressed_to_bgr(msg) if self._compressed
                    else image_utils.ros_image_to_bgr(msg))
         except Exception as exc:
             self._record_error(f'image decode failed: {exc}')
-            return
+            return False
 
-        # Encode the latest frame as JPEG
         ok, buffer = cv2.imencode('.jpg', bgr)
         if not ok:
-            return ({'status': 'error', 'message': 'Failed to encode JPEG'}), 500
+            self._record_error('failed to encode frame as JPEG')
+            return False
 
-        filename = f"{filename}-{int(time.time())}.jpg"
-        files = {'data': (filename, io.BytesIO(buffer.tobytes()), 'image/jpeg')}
+        name = f'{filename or "frame"}-{int(time.time())}.jpg'
+        files = {'data': (name, io.BytesIO(buffer.tobytes()), 'image/jpeg')}
         headers = {'x-api-key': self._api_key}
-        url = EI_INGEST_URL + f"{category}/files"
-        resp = requests.post(url, files=files, headers=headers, params={'filename': filename}, timeout=30)
+        if label:
+            headers['x-label'] = label
+        url = EI_INGEST_URL + f'{category}/files'
+
+        try:
+            resp = requests.post(url, files=files, headers=headers, timeout=30)
+        except requests.RequestException as exc:
+            self._record_error(f'ingestion request failed: {exc}')
+            return False
+
+        with self._stats_lock:
+            if 200 <= resp.status_code < 300:
+                self._uploads_sent += 1
+                self._last_error = ''
+            else:
+                self._uploads_failed += 1
 
         if 200 <= resp.status_code < 300:
-            return ({'status': 'success'})
+            self.get_logger().info(f'Uploaded frame "{name}" to Edge Impulse ({category})')
+            return True
 
-        return ({'status': 'error', 'message': resp.text, 'status_code': resp.status_code}), resp.status_code
+        self._record_error(f'ingestion upload failed ({resp.status_code}): {resp.text}')
+        return False
 
     def _record_error(self, message):
         """Log (throttled) and remember the most recent processing error."""
@@ -180,17 +198,12 @@ class EdgeImpulseIngestion(Node):
             self._last_error = message
 
     def _publish_diagnostics(self):
-        """Publish a DiagnosticArray summarising throughput and model health."""
-        now = time.monotonic()
+        """Publish a DiagnosticArray summarising ingestion throughput and health."""
         with self._stats_lock:
-            frames = self._frames
-            drops = self._drops
+            frames = self._frames_received
+            sent = self._uploads_sent
+            failed = self._uploads_failed
             last_error = self._last_error
-            window = frames - self._diag_last_frames
-            elapsed = now - self._diag_last_time
-            self._diag_last_frames = frames
-            self._diag_last_time = now
-        fps = (window / elapsed) if elapsed > 0 else 0.0
 
         status = DiagnosticStatus()
         status.name = f'{self.get_name()}: ingestion'
@@ -203,10 +216,11 @@ class EdgeImpulseIngestion(Node):
             status.message = 'waiting for images'
         else:
             status.level = DiagnosticStatus.OK
-            status.message = f'{fps:.1f} FPS'
+            status.message = f'{sent} uploaded, {failed} failed'
         status.values = [
-            KeyValue(key='frames', value=str(frames)),
-            KeyValue(key='dropped_frames', value=str(drops))
+            KeyValue(key='frames_received', value=str(frames)),
+            KeyValue(key='uploads_sent', value=str(sent)),
+            KeyValue(key='uploads_failed', value=str(failed)),
         ]
 
         array = DiagnosticArray()
@@ -214,8 +228,9 @@ class EdgeImpulseIngestion(Node):
         array.status.append(status)
         self._diag_pub.publish(array)
 
+
 def main(args=None):
-    """Console-script entry point for the ``edgeimpulse_detector`` executable."""
+    """Console-script entry point for the ``edgeimpulse_ingestion`` executable."""
     rclpy.init(args=args)
     node = None
     try:
@@ -231,6 +246,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.try_shutdown()
+
 
 if __name__ == '__main__':
     main()
