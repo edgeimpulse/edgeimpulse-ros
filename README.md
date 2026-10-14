@@ -219,6 +219,51 @@ with:
 ros2 run rqt_robot_monitor rqt_robot_monitor
 ```
 
+## Data ingestion
+
+`edgeimpulse_ingestion` is a second, standalone node for capturing new training
+data: it subscribes to the same kind of image topic as the detector but does
+not run inference. It keeps the most recent frame in memory and uploads it to
+your Edge Impulse project's [Ingestion API](https://docs.edgeimpulse.com/reference/ingestion-api)
+whenever a `std_msgs/String` JSON message arrives on the `trigger` topic.
+
+```bash
+ros2 launch edgeimpulse_ros edgeimpulse_ingestion.launch.py \
+  api_key:=ei_your_ingestion_key \
+  image_topic:=/camera/image_raw
+```
+
+Trigger an upload of the current frame:
+
+```bash
+ros2 topic pub --once /trigger std_msgs/String \
+  "data: '{\"category\": \"training\", \"label\": \"cat\", \"filename\": \"sample\"}'"
+```
+
+Or publish the trigger from Python (e.g. from another node's callback):
+
+```python
+import json
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+rclpy.init()
+node = Node('ingestion_trigger_example')
+pub = node.create_publisher(String, 'trigger', 10)
+
+msg = String()
+msg.data = json.dumps({'category': 'training', 'label': 'cat', 'filename': 'sample'})
+pub.publish(msg)
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `category` | no (default `training`) | `training`, `testing` or `split`. |
+| `label` | no | Sent as the `x-label` header. |
+| `filename` | no | Base name for the uploaded file; a timestamp suffix is always appended. |
+
 ## Testing
 
 ```bash

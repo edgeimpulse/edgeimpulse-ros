@@ -1,0 +1,23 @@
+# Example parameters for the Edge Impulse ingestion node.
+#
+# Run with:
+#   ros2 run edgeimpulse_ros edgeimpulse_ingestion \
+#     --ros-args --params-file install/edgeimpulse_ros/share/edgeimpulse_ros/config/edgeimpulse_ingestion.yaml
+#
+# or point a launch file at it. Every value below is optional except api_key.
+edgeimpulse_ingestion:
+  ros__parameters:
+    # REQUIRED: your Edge Impulse project ingestion API key.
+    api_key: ""
+
+    # Where images come from. This node does NOT open a camera; run any camera
+    # driver (v4l2_camera, usb_cam, qrb_ros_camera, a rosbag, ...) and set this
+    # to the topic it publishes. Frames are only uploaded on demand (see the
+    # "trigger" topic) -- the node does not stream continuously.
+    image_topic: "image"
+    image_transport: "raw"        # raw | compressed
+    image_qos: "sensor_data"      # sensor_data | reliable | default
+
+    # Debug / introspection.
+    publish_diagnostics: true
+    diagnostic_period: 1.0
