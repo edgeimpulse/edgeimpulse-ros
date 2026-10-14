@@ -68,6 +68,9 @@ class EdgeImpulseIngestion(Node):
         self._frame_lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._latest_msg = None
+        self._latest_img = None
+        self._ingestion_event = threading.Event()
+        self._shutdown = threading.Event()
 
         self._frames_received = 0
         self._uploads_sent = 0
@@ -75,6 +78,10 @@ class EdgeImpulseIngestion(Node):
         self._last_error = ''
 
         self._create_subscription()
+
+        self._worker = threading.Thread(target=self._worker_loop, name='ei_ingestion_upload',
+                                        daemon=True)
+        self._worker.start()
 
         if self._publish_diag and diag_period > 0.0:
             self._diag_timer = self.create_timer(diag_period, self._publish_diagnostics)
@@ -102,7 +109,9 @@ class EdgeImpulseIngestion(Node):
         else:
             topic = self._image_topic
             self._sub = self.create_subscription(Image, topic, self._on_image, qos)
-        self._trigger_sub = self.create_subscription(String, 'trigger', self._on_trigger, qos)
+        self._trigger_sub = self.create_subscription(String, 'trigger',
+                                                     self._on_trigger,
+                                                     self._resolve_qos('reliable'))
         self.get_logger().info(
             f'Subscribed to "{topic}" ({self._transport}, qos={self._qos_name})')
 
@@ -119,9 +128,23 @@ class EdgeImpulseIngestion(Node):
     def _on_image(self, msg):
         """Store the newest received frame for on-demand ingestion."""
         with self._frame_lock:
-            self._latest_msg = msg
+            self._latest_img = msg
         with self._stats_lock:
             self._frames_received += 1
+
+    def _worker_loop(self):
+        """For sending the latest frame to Edge Impulse in a background thread."""
+        while not self._shutdown.is_set():
+            if not self._ingestion_event.wait(timeout=0.2):
+                continue
+            self._ingestion_event.clear()
+            while not self._shutdown.is_set():
+                with self._frame_lock:
+                    msg = self._latest_msg
+                    self._latest_msg = None
+                if msg is None:
+                    break
+                self._send_to_edge_impulse(msg)
 
     def _on_trigger(self, msg):
         """Parse a trigger message and upload the latest frame to Edge Impulse."""
@@ -131,9 +154,13 @@ class EdgeImpulseIngestion(Node):
             self._record_error(f'invalid trigger payload: {exc}')
             return
 
+        if not isinstance(items, dict):
+            self._record_error('trigger payload must be a JSON object')
+            return
+
         with self._frame_lock:
-            latest_msg = self._latest_msg
-        if latest_msg is None:
+            latest_img = self._latest_img
+        if latest_img is None:
             self._record_error('trigger received but no image has arrived yet')
             return
 
@@ -142,19 +169,29 @@ class EdgeImpulseIngestion(Node):
         filename = items.get('filename')
         self.get_logger().info(
             f'Trigger received: category={category} label={label} filename={filename}')
-        self._send_to_edge_impulse(latest_msg, category=category, label=label, filename=filename)
+        with self._frame_lock:
+            self._latest_msg = {'img': latest_img,
+                                'category': category,
+                                'label': label,
+                                'filename': filename}
+        self._ingestion_event.set()
 
     # ---------------------------------------------------------------- pipeline
 
-    def _send_to_edge_impulse(self, msg, category='training', label=None, filename=None):
+    def _send_to_edge_impulse(self, msg):
         """Upload a single frame to the Edge Impulse ingestion API."""
+        img = msg['img']
+        category = msg['category']
+        label = msg['label']
+        filename = msg['filename']
+
         if category not in INGEST_CATEGORIES:
             self._record_error(f'invalid ingestion category "{category}"')
             return False
 
         try:
-            bgr = (image_utils.compressed_to_bgr(msg) if self._compressed
-                   else image_utils.ros_image_to_bgr(msg))
+            bgr = (image_utils.compressed_to_bgr(img) if self._compressed
+                   else image_utils.ros_image_to_bgr(img))
         except Exception as exc:
             self._record_error(f'image decode failed: {exc}')
             return False
@@ -169,7 +206,7 @@ class EdgeImpulseIngestion(Node):
         headers = {'x-api-key': self._api_key}
         if label:
             headers['x-label'] = label
-        url = EI_INGEST_URL + f'{category}/files'
+        url = EI_INGEST_URL + f"{category}/files"
 
         try:
             resp = requests.post(url, files=files, headers=headers, timeout=30)
@@ -227,6 +264,17 @@ class EdgeImpulseIngestion(Node):
         array.header.stamp = self.get_clock().now().to_msg()
         array.status.append(status)
         self._diag_pub.publish(array)
+
+    # ---------------------------------------------------------------- shutdown
+
+    def destroy_node(self):
+        """Stop the worker thread and the ingestion process, then tear down."""
+        self._shutdown.set()
+        self._ingestion_event.set()
+        worker = getattr(self, '_worker', None)
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=30.0)
+        super().destroy_node()
 
 
 def main(args=None):

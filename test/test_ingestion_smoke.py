@@ -48,7 +48,7 @@ def _run_trigger(trigger_payload):
             post.return_value = MagicMock(status_code=200, text='ok')
 
             deadline = time.time() + 10.0
-            while time.time() < deadline and node._latest_msg is None:
+            while time.time() < deadline and node._latest_img is None:
                 image_pub.publish(_make_image())
                 executor.spin_once(timeout_sec=0.1)
 
@@ -87,6 +87,23 @@ def test_invalid_trigger_json_does_not_raise():
         ])
         node._on_trigger(String(data='not json'))
         assert 'invalid trigger payload' in node._last_error
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_trigger_with_non_dict_payload_does_not_raise():
+    """Trigger payloads that are not JSON objects are handled gracefully, not raised."""
+    rclpy.init()
+    node = None
+    try:
+        node = EdgeImpulseIngestion(parameter_overrides=[
+            Parameter('api_key', value='ei_test_key'),
+            Parameter('publish_diagnostics', value=False),
+        ])
+        node._on_trigger(String(data=json.dumps(['not', 'a', 'dict'])))
+        assert 'trigger payload must be a JSON object' in node._last_error
     finally:
         if node is not None:
             node.destroy_node()
